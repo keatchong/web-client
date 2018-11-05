@@ -29,19 +29,19 @@ import ai.api.web.AIWebhookServletV1;
 public class WebhookSampleV1 extends AIWebhookServletV1 {
 	
 	private static final long serialVersionUID = 1L;
-	private final String  webServiceURL = "http://localhost/th/webservice_json";
+	private String  webServiceURL = "";
 	
 	@Override
-	protected void doWebhook(AIWebhookRequest input, Fulfillment output, boolean testMode) {
-		try {
-			if ( testMode ) {
-				postToStub(generateRequestJSON(input),output);
+	protected void doWebhook(AIWebhookRequest input, Fulfillment output, boolean stubMode, boolean localMode) {
+		if ( stubMode ) {
+			postToStub(input,output);
+		} else {
+			if (localMode) {
+				webServiceURL = "http://localhost/th/webservice_json";
 			} else {
-				postToWebservice(generateRequestJSON(input),output);
+				webServiceURL = "http://13.229.1.3/hrdemo/webservice_json";
 			}
-		} catch (JsonProcessingException e) {
-			// TODO Auto-generated catch block
-			e.printStackTrace();
+			postToWebservice(input,output);
 		}
 		
 	}
@@ -52,27 +52,35 @@ public class WebhookSampleV1 extends AIWebhookServletV1 {
 			String dateFormat = "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'";
 			mapper.setDateFormat(new SimpleDateFormat(dateFormat));
 			HashMap<String, JsonElement> params = input.getResult().getParameters();
+			AIOutputContext context = input.getResult().getContext("login-authentication");
+			Map<String, JsonElement> contextParams  = context.getParameters();
+			
 			
 			Map<String, Object> jsonMap = new HashMap<String, Object>();
 			Map<String, Object> inputMap = new HashMap<String, Object>();
 		
 			jsonMap.put("action_name", input.getResult().getMetadata().getIntentName());
-			
-			Iterator<Entry<String, JsonElement>> it = params.entrySet().iterator();
 		
 			String key = null;
 			JsonElement value = null;
+			
+			Iterator<Entry<String, JsonElement>> it = contextParams.entrySet().iterator();
+			while (it.hasNext()) {
+		        Entry<String, JsonElement> pair = it.next();
+		        key = pair.getKey();   		
+		        
+		       if ( ("access_key_id").equals(key) || "timestamp".equals(key) ||
+		        		"signature".equals(key) || "tokenid".equals(key) ) {
+		        	jsonMap.put((String) pair.getKey(),pair.getValue().getAsString());
+		        } 
+		   
+			}
+			
+			it = params.entrySet().iterator();
 			while (it.hasNext()) {
 			        Entry<String, JsonElement> pair = it.next();
 			        key = pair.getKey();   		
-			        
-			        if ( ("access_key_id").equals(key) || "timestamp".equals(key) ||
-			        		"signature".equals(key) ) {
-			        	jsonMap.put((String) pair.getKey(),pair.getValue().getAsString());
-			        } else {
-			        	inputMap.put((String) pair.getKey(),pair.getValue().getAsString());
-			        }
-			        it.remove();
+			        inputMap.put((String) pair.getKey(),pair.getValue().getAsString());
 			}
 			jsonMap.put("input",inputMap);
 			
@@ -98,19 +106,20 @@ public class WebhookSampleV1 extends AIWebhookServletV1 {
 				  }
 				}*/
 
+			System.out.println("JSON Request to Web Service : " + mapper.writerWithDefaultPrettyPrinter().writeValueAsString(jsonMap));
 			return mapper.writerWithDefaultPrettyPrinter().writeValueAsString(jsonMap);
 	}
 	
-	private void postToWebservice(String data,Fulfillment output) {
+	private void postToWebservice(AIWebhookRequest input,Fulfillment output) {
 		
 		HttpClient httpClient = HttpClientBuilder.create().build(); 
 	    
 		try {
 			HttpPost request = new HttpPost(webServiceURL);
-		    StringEntity params =new StringEntity(data);
+		    StringEntity params =new StringEntity(generateRequestJSON(input));
 		    request.addHeader("content-type",  "application/json");
 		    request.setEntity(params);
-		    generateResponse( httpClient.execute(request),output);
+		    generateResponse( input,httpClient.execute(request),output);
 		}catch (Exception ex) {
 			//handle exception here
 		} finally {
@@ -119,12 +128,12 @@ public class WebhookSampleV1 extends AIWebhookServletV1 {
 		
 	}
 	
-	private void postToStub(String data, Fulfillment output)  {
+	private void postToStub(AIWebhookRequest input, Fulfillment output)  {
 
 		JsonNode jsonInput = null;
 		try {
 			ObjectMapper mapper = new ObjectMapper();
-			jsonInput = mapper.readTree(data);
+			jsonInput = mapper.readTree(generateRequestJSON(input));
 		} catch (Exception ex) {
 			ex.printStackTrace();
 			return;
@@ -136,11 +145,12 @@ public class WebhookSampleV1 extends AIWebhookServletV1 {
 		} else if (jsonInput.path("action_name").asText().equals("leave.list_leave_entitlement")) {
 			response = "{\"results\":{ \"RH02\":{ \"balance\":-6, \"leavetypedesc\":\"CUTIKECEMASAN\", \"leavetypecode\":\"RH02\", \"showbalance\":0 }, \"BK01\":{ \"balance\":-1, \"leavetypedesc\":\"CUTIGANTIAN-LEBIHMASA\", \"leavetypecode\":\"BK01\", \"showbalance\":1 }, \"TR02\":{ \"balance\":-3, \"leavetypedesc\":\"CUTITANPAREKOD-PEPERIKSAAN/BELAJAR\", \"leavetypecode\":\"TR02\", \"showbalance\":0 } }, \"status\":\"success\", \"success_msg\":\"\" }";
 		}
-		generateStubResponse(response,output);
+		System.out.println("Response = " + response);
+		generateStubResponse(input,response,output);
 	}
 	
 
-	private void generateResponse(HttpResponse response, Fulfillment output) throws IOException {
+	private void generateResponse(AIWebhookRequest input, HttpResponse response, Fulfillment output) throws IOException {
 		
 		JsonNode jsonResp = null;
 		try {
@@ -148,15 +158,23 @@ public class WebhookSampleV1 extends AIWebhookServletV1 {
 			jsonResp = mapper.readTree(getBody(response));
 		} catch (Exception ex) {
 			ex.printStackTrace();
-		//	handleError(request, response, "Param is invalid");
 			return;
 		}
-		output.setDisplayText(jsonResp.path("success_msg").asText());
-		output.setContextOut(prepareOutputContext(jsonResp));
-		
+	
+		String jsonRespStr = "";
+		try {
+		        ObjectMapper mapper = new ObjectMapper();
+		        Object json = mapper.readValue(jsonResp.toString(), Object.class);
+		        jsonRespStr =  mapper.writerWithDefaultPrettyPrinter().writeValueAsString(json);
+		} catch (Exception e) {
+		       e.printStackTrace();
+		}
+		output.setDisplayText(jsonResp.toString());
+		output.setSpeech(jsonResp.toString());
+		output.setContextOut(prepareAuthenticationOutputContext(input,jsonResp));
 	}
 
-	private void generateStubResponse(String jsonData, Fulfillment output)  {
+	private void generateStubResponse(AIWebhookRequest input,String jsonData, Fulfillment output)  {
 		
 		JsonNode jsonResp = null;
 		try {
@@ -164,18 +182,65 @@ public class WebhookSampleV1 extends AIWebhookServletV1 {
 			jsonResp = mapper.readTree(jsonData);
 		} catch (Exception ex) {
 			ex.printStackTrace();
-		//	handleError(request, response, "Param is invalid");
 			return;
 		}
-		output.setDisplayText(jsonResp.path("success_msg").asText());
-		output.setContextOut(prepareOutputContext(jsonResp));
+		
+		String jsonRespStr = "";
+		try {
+		        ObjectMapper mapper = new ObjectMapper();
+		        Object json = mapper.readValue(jsonResp.toString(), Object.class);
+		        jsonRespStr =  mapper.writerWithDefaultPrettyPrinter().writeValueAsString(json);
+		} catch (Exception e) {
+		       e.printStackTrace();
+		}
+		output.setDisplayText(jsonResp.toString());
+		output.setSpeech(jsonResp.toString());
+		output.setContextOut(prepareAuthenticationOutputContext(input,jsonResp));
+	}
+
+	
+	private AIOutputContext prepareAuthenticationOutputContext(AIWebhookRequest input,JsonNode jsonResp) {
+		
+		AIOutputContext  contextOut = input.getResult().getContext("login-authentication") == null?new AIOutputContext():input.getResult().getContext("login-authentication"); 
+		if  ( contextOut.getName() == null || contextOut.getName().equals("")) {
+			contextOut.setName("login-authentication");
+		}
+		Map<String, JsonElement> contextParams = contextOut.getParameters();
+		
+		if ( contextParams == null) {
+			 contextOut.setParameters(new HashMap<String, JsonElement>());
+		}
+		
+		String intentName = input.getResult().getMetadata().getIntentName();		
+		if ( intentName  != null && !intentName.equals("") && intentName.equals("login")  ) {
+			try {
+				Gson gson = new Gson();
+				Iterator<String> nodes = jsonResp.path("results").fieldNames();
+				Map<String, JsonElement> tokenParam = contextOut.getParameters();
+				while ( nodes.hasNext()) {
+					String node = nodes.next();
+					String value = jsonResp.path("results").path(node).asText();
+					if ( value.contains(" ")) {
+						value = '"' + value + '"';
+					}
+					JsonElement element = gson.fromJson(value, JsonElement.class);
+					tokenParam.put(node, element);
+				}
+				contextOut.setParameters(tokenParam);
+				} catch (Exception e) {
+					e.printStackTrace();
+				}
+				return contextOut;
+		} else {
+				return contextOut;
+		}
 		
 	}
 	
-	private AIOutputContext prepareOutputContext(JsonNode jsonResp) {
+	/*private AIOutputContext prepareOutputContext(JsonNode jsonResp) {
 		
 		AIOutputContext contextOut = new AIOutputContext();
-		contextOut.setName("login-authenticated");
+		contextOut.setName("DUMMY");
 		contextOut.setLifespan(new Integer(500));
 		
 		try {
@@ -197,7 +262,7 @@ public class WebhookSampleV1 extends AIWebhookServletV1 {
 			
 		}
 		return contextOut;
-	}
+	}*/
 	
 	private static String getBody(HttpResponse response) throws IOException {
 
@@ -240,3 +305,6 @@ public class WebhookSampleV1 extends AIWebhookServletV1 {
 	
 
 }
+
+
+
